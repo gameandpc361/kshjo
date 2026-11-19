@@ -63,6 +63,8 @@ POST
         "reposts": 0,
         "replies": 0,
         "images": []
-    },
+    }],
+    "next_before": 000
+    }
 
-```json
+```
