@@ -16,7 +16,7 @@ final class LogStore: ObservableObject {
     }
 
     /// ログ記録(メモリ+JSONLファイルへの逐次追記)
-    func log(_ level: LogLevel, category: String, _ message: String) {
+    func log(_ level: LogLevel, _ category: String, _ message: String) {
         let entry = LogEntry(id: UUID(), date: Date(), level: level,
                              category: category, message: message)
         DispatchQueue.main.async {
