@@ -6,6 +6,16 @@ http://kashejo.f5.si/api/v1/
 
 ここから、エンドポイントにリクエストしたりする
 
+## 認証
+
+kashejoの設定→APIキーで事前にAPIキーを取得。
+
+APIキーをヘッダーに必ず付けなければいけない。
+
+```Authorization: Bearer キー```
+
+例:curl -H "Authorization: Bearer キー" https://kashejo.f5.si/api/v1/me
+
 ## Endpoints
 
 ### タイムライン
@@ -16,7 +26,8 @@ http://kashejo.f5.si/api/v1/
 
 メソッド: GET
 
-Request Headers
-```Authorization: Bearer YOUR_API_KEY```
+ヘッダー
+
+```Accept: 受信形式(省略可)```
 
 |
