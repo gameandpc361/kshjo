@@ -9,9 +9,9 @@ struct ComposeView: View {
     @ObservedObject private var history = HistoryStore.shared
 
     @State private var text = ""
-    @State private var media: [MediaItem] = []
-    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var pickerItem: PhotosPickerItem?
     @State private var showFileImporter = false
+    @State private var imageData: Data?
     @State private var sending = false
     @State private var statusText = ""
     @State private var alert: AlertItem?
@@ -32,30 +32,31 @@ struct ComposeView: View {
                         .foregroundStyle(overLimit ? Color.red : Color.secondary)
                 }
 
-                Section("画像(最大\(ImageUtil.maxCount)枚・各10MiB)") {
-                    if !media.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack {
-                                ForEach(media) { item in
-                                    thumbnail(item)
-                                }
+                Section("画像(任意・1枚)") {
+                    if let data = imageData, let ui = UIImage(data: data) {
+                        HStack(alignment: .top) {
+                            Image(uiImage: ui)
+                                .resizable().scaledToFit()
+                                .frame(maxHeight: 150)
+                                .cornerRadius(8)
+                            Spacer()
+                            Button("取り消す", role: .destructive) {
+                                imageData = nil
+                                pickerItem = nil
                             }
                         }
-                    }
-                    HStack {
-                        PhotosPicker(selection: $pickerItems,
-                                     maxSelectionCount: max(1, ImageUtil.maxCount - media.count),
-                                     matching: .images) {
-                            Label("写真から", systemImage: "photo.on.rectangle")
+                    } else {
+                        HStack {
+                            PhotosPicker(selection: $pickerItem, matching: .images) {
+                                Label("写真", systemImage: "photo.on.rectangle")
+                            }
+                            Spacer()
+                            Button {
+                                showFileImporter = true
+                            } label: {
+                                Label("ファイル", systemImage: "folder")
+                            }
                         }
-                        .disabled(media.count >= ImageUtil.maxCount)
-
-                        Button {
-                            showFileImporter = true
-                        } label: {
-                            Label("ファイルから", systemImage: "folder")
-                        }
-                        .disabled(media.count >= ImageUtil.maxCount)
                     }
                 }
 
@@ -79,34 +80,32 @@ struct ComposeView: View {
                             Spacer()
                         }
                     }
-                    .disabled(sending || (trimmed.isEmpty && media.isEmpty) || overLimit || accounts.active == nil)
+                    .disabled(sending || (trimmed.isEmpty && imageData == nil) || overLimit || accounts.active == nil)
                 } footer: {
                     if overLimit { Text("文字数が上限を超えています").foregroundStyle(.red) }
                 }
             }
             .dismissibleKeyboard()
             .navigationTitle("bot投稿")
-            .onChange(of: pickerItems) { items in
-                guard !items.isEmpty else { return }
+            .onChange(of: pickerItem) { item in
+                guard let item else { return }
                 Task {
-                    for item in items {
-                        if let data = try? await item.loadTransferable(type: Data.self) {
-                            addData(data, suggestedName: nil)
-                        }
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        applyImage(data)
                     }
-                    pickerItems = []
+                    pickerItem = nil
                 }
             }
             .fileImporter(isPresented: $showFileImporter,
                           allowedContentTypes: [.image],
-                          allowsMultipleSelection: true) { result in
+                          allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
-                    for url in urls {
+                    if let url = urls.first {
                         let secured = url.startAccessingSecurityScopedResource()
                         defer { if secured { url.stopAccessingSecurityScopedResource() } }
                         if let data = try? Data(contentsOf: url) {
-                            addData(data, suggestedName: url.lastPathComponent)
+                            applyImage(data)
                         }
                     }
                 case .failure(let error):
@@ -120,45 +119,13 @@ struct ComposeView: View {
         }
     }
 
-    private func thumbnail(_ item: MediaItem) -> some View {
-        Group {
-            if let ui = UIImage(data: item.data) {
-                Image(uiImage: ui)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 70, height: 70)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 70, height: 70)
-                    .overlay {
-                        Image(systemName: "photo").foregroundStyle(.secondary)
-                    }
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            Button {
-                media.removeAll { $0.id == item.id }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.white, .black.opacity(0.6))
-            }
-            .offset(x: 6, y: -6)
-        }
-    }
-
-    private func addData(_ data: Data, suggestedName: String?) {
-        guard media.count < ImageUtil.maxCount else {
-            alert = AlertItem(title: "追加できません", message: "画像は最大\(ImageUtil.maxCount)枚までです")
-            return
-        }
-        switch ImageUtil.process(data, suggestedName: suggestedName) {
-        case .success(let item):
-            media.append(item)
-            LogStore.shared.log(.debug, "api", "画像追加: \(item.filename) \(item.data.count) bytes \(item.mimeType)")
+    private func applyImage(_ data: Data) {
+        switch ImageUtil.process(data, suggestedName: nil) {
+        case .success(let m):
+            imageData = m.data
+            LogStore.shared.log(.debug, "api", "画像設定: \(m.mimeType) \(m.data.count) bytes")
         case .failure(let message):
-            alert = AlertItem(title: "画像を追加できません", message: message)
+            alert = AlertItem(title: "この画像は使えません", message: message)
         }
     }
 
@@ -167,19 +134,21 @@ struct ComposeView: View {
         guard !sending, let account = accounts.active else { return }
         sending = true
         defer { sending = false }
-        let content = text
-        LogStore.shared.log(.info, "api", "手動投稿開始 @\(account.username) 画像\(media.count)枚")
+        LogStore.shared.log(.info, "api", "手動投稿開始 @\(account.username)")
 
         do {
             let client = try settings.makeClient(token: account.token)
             var fileIds: [String] = []
-            for (index, item) in media.enumerated() {
-                statusText = "画像アップロード中 (\(index + 1)/\(media.count))"
-                let id = try await client.uploadFile(item)
+            if let data = imageData {
+                statusText = "画像アップロード中"
+                let mime = ImageUtil.detectFormat(data)?.mimeType ?? "image/jpeg"
+                let name = "post_\(Int(Date().timeIntervalSince1970)).jpg"
+                let id = try await client.uploadFile(MediaItem(data: data, filename: name, mimeType: mime))
                 fileIds.append(id)
                 LogStore.shared.log(.debug, "api", "アップロード完了: \(id)")
             }
             statusText = "投稿中…"
+            let content = text
             let response = try await client.createPost(text: content.isEmpty ? nil : content,
                                                        fileIds: fileIds)
             history.add(HistoryEntry(id: UUID(), date: Date(), account: account.label,
@@ -187,16 +156,16 @@ struct ComposeView: View {
                                      text: content, hasImage: !fileIds.isEmpty,
                                      success: true,
                                      message: String(response.prefix(150))))
-            LogStore.shared.log(.info, "api", "投稿成功: \(String(response.prefix(300)))")
+            LogStore.shared.log(.info, "api", "手動投稿成功: \(String(response.prefix(300)))")
             text = ""
-            media = []
-            pickerItems = []
+            imageData = nil
+            pickerItem = nil
             statusText = ""
         } catch {
             statusText = ""
             history.add(HistoryEntry(id: UUID(), date: Date(), account: account.label,
-                                     kind: media.isEmpty ? "text" : "image",
-                                     text: content, hasImage: !media.isEmpty,
+                                     kind: imageData == nil ? "text" : "image",
+                                     text: text, hasImage: imageData != nil,
                                      success: false, message: error.localizedDescription))
             LogStore.shared.log(.error, "api", "手動投稿失敗: \(error.localizedDescription)")
             alert = AlertItem(title: "投稿失敗", message: error.localizedDescription)
