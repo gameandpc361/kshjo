@@ -1,4 +1,4 @@
-# kshjo API仕様
+# kashejo API仕様
 
 http://kashejo.f5.si/api/v1/
 
@@ -40,6 +40,27 @@ POST
 
 ヘッダー
 
-```Accept: 受信形式 - 受信形式の指定(省略可)```
+```特になし```
 
-|
+|パラメータ|
+
+レスポンス
+```{
+    "posts": [{
+        "id": 444,
+        "url": "/posts/444",
+        "author": {
+            "id": 107,
+            "handle": "keitakawase",
+            "name": "かわせけいた"
+        },
+        "body": "おはいお",
+        "kind": "post",
+        "created_at": 1795125894,
+        "reply_to": null,
+        "quote_id": null,
+        "likes": 0,
+        "reposts": 0,
+        "replies": 0,
+        "images": []
+    },```
