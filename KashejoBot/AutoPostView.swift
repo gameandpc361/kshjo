@@ -1,5 +1,7 @@
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
+import UIKit
 
 struct AutoPostView: View {
     @ObservedObject private var settings = SettingsStore.shared
@@ -7,13 +9,9 @@ struct AutoPostView: View {
 
     @StateObject private var engine = AutoPostEngine()
 
-    @State private var pickerItems: [PhotosPickerItem] = []
-    @State private var imageData: [Data] = []
-
     var body: some View {
         NavigationStack {
             Form {
-                // 実行状況
                 Section("実行状況") {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(alignment: .leading, spacing: 6) {
@@ -72,10 +70,8 @@ struct AutoPostView: View {
                     .padding()
                 }
 
-                // 連投設定
                 Section {
                     Stepper("投稿件数: \(settings.burstCount)件", value: $settings.burstCount, in: 1...200)
-
                     HStack {
                         Text("間隔")
                         TextField("数値", value: $settings.intervalValue, format: .number)
@@ -83,9 +79,7 @@ struct AutoPostView: View {
                             .multilineTextAlignment(.trailing)
                             .frame(width: 70)
                         Picker("", selection: $settings.intervalUnit) {
-                            ForEach(IntervalUnit.allCases) { u in
-                                Text(u.label).tag(u)
-                            }
+                            ForEach(IntervalUnit.allCases) { u in Text(u.label).tag(u) }
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 150)
@@ -93,52 +87,25 @@ struct AutoPostView: View {
                 } header: {
                     Text("連投設定")
                 } footer: {
-                    Text("実質間隔: 約\(Int(max(1, settings.intervalValue) * settings.intervalUnit.factor))秒。秒単位の高頻度連投はサーバーに負荷をかけ、制限(BAN)される恐れがあります。")
+                    Text("実質間隔: 約\(Int(max(1, settings.intervalValue) * settings.intervalUnit.factor))秒")
                 }
 
-                // 内容
                 Section {
-                    Toggle("画像を添付する", isOn: $settings.attachImages)
                     Picker("選択順", selection: $settings.orderRandom) {
                         Text("順番").tag(false)
                         Text("ランダム").tag(true)
                     }
                     .pickerStyle(.segmented)
 
-                    PhotosPicker(selection: $pickerItems, maxSelectionCount: 10, matching: .images) {
-                        Label("画像を選ぶ (\(imageData.count)枚)", systemImage: "photo.on.rectangle")
-                    }
-
-                    if !imageData.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack {
-                                ForEach(imageData.indices, id: \.self) { i in
-                                    if let ui = UIImage(data: imageData[i]) {
-                                        Image(uiImage: ui)
-                                            .resizable().scaledToFill()
-                                            .frame(width: 60, height: 60)
-                                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                                            .overlay(alignment: .topTrailing) {
-                                                Button {
-                                                    imageData.remove(at: i)
-                                                } label: {
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .foregroundStyle(.white, .black.opacity(0.6))
-                                                }
-                                                .offset(x: 4, y: -4)
-                                            }
-                                    }
-                                }
-                            }
-                        }
+                    NavigationLink("テンプレート編集(\(settings.postTemplates.count)件)") {
+                        TemplatesEditor()
                     }
                 } header: {
                     Text("投稿内容")
                 } footer: {
-                    Text("テンプレート \(settings.templates.count)件から選ばれます。画像OFFならテキストのみ連投します。")
+                    Text("本文の {rand} はランダム英数字に置換され、テンプレートの固定画像が添付されます。テンプレートを順番/ランダムに選んで連投します。")
                 }
 
-                // エラー耐性
                 Section {
                     Stepper("1件あたり試行: \(settings.retryLimit + 1)回", value: $settings.retryLimit, in: 0...5)
                     Stepper("連続失敗しきい値: \(settings.failureThreshold)回", value: $settings.failureThreshold, in: 1...10)
@@ -146,72 +113,200 @@ struct AutoPostView: View {
                 } header: {
                     Text("エラー時の動作")
                 } footer: {
-                    Text("失敗がしきい値に達すると、まず登録済みの別アカウントへ自動切替します。自動再作成がONの場合、サインアップAPIで新規アカウントを作って切り替えます(サイトがAPI作成に対応している必要あり。規約で禁止なら必ずOFF)。")
+                    Text("しきい値到達で別アカウントへ自動切替。自動再作成はサイトがサインアップAPIに対応している場合のみ動作します(規約で禁止なら必ずOFF)。")
                 }
 
                 Section {
-                    NavigationLink("テンプレートを編集 (\(settings.templates.count)件)") {
-                        TemplatesEditor()
-                    }
-                    NavigationLink("アカウント管理") {
-                        AccountsView()
-                    }
+                    NavigationLink("アカウント管理") { AccountsView() }
                 }
             }
+            .dismissibleKeyboard()
             .navigationTitle("自動連投")
-            .onChange(of: pickerItems) { items in
-                Task {
-                    var loaded: [Data] = []
-                    for item in items {
-                        if let d = try? await item.loadTransferable(type: Data.self) {
-                            loaded.append(ImageUtil.jpegData(from: d))
-                        }
-                    }
-                    imageData = loaded
-                }
-            }
         }
     }
 
     private func startBurst() {
         guard accounts.active != nil else { return }
-        let hasContent = !settings.templates.isEmpty || (settings.attachImages && !imageData.isEmpty)
-        guard hasContent else { return }
-        engine.setImages(imageData)
+        guard !settings.postTemplates.isEmpty else { return }
         engine.start(settings: settings, accounts: accounts)
     }
 }
 
+// MARK: - テンプレート編集
+
 struct TemplatesEditor: View {
     @ObservedObject private var settings = SettingsStore.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var items: [Item] = []
 
     struct Item: Identifiable {
-        let id = UUID()
+        let id: UUID
         var text: String
+        var images: [String]
     }
+
+    @State private var items: [Item] = []
+    @State private var photoTarget: UUID?
+    @State private var pickedPhoto: PhotosPickerItem?
+    @State private var showPhotoPicker = false
+    @State private var fileTarget: UUID?
+    @State private var showFileImporter = false
+    @State private var alert: AlertItem?
 
     var body: some View {
         Form {
-            ForEach($items) { $item in
-                TextField("テンプレート", text: $item.text, axis: .vertical)
+            Section {
+                ForEach($items) { $item in
+                    templateRow($item)
+                }
+                .onDelete { offsets in
+                    for i in offsets {
+                        items[i].images.forEach { TemplateImageStore.shared.delete($0) }
+                    }
+                    items.remove(atOffsets: offsets)
+                }
+            } header: {
+                Text("テンプレート一覧")
+            } footer: {
+                Text("本文の {rand} はランダム英数字10文字({rand:20}なら20文字)に置換されます。テンプレートごとに固定画像を最大\(ImageUtil.maxCount)枚・各10MiBまで添付できます(PNG/JPEG/GIF/WebP/AVIF)。")
             }
-            .onDelete { items.remove(atOffsets: $0) }
         }
-        .navigationTitle("テンプレート")
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("テンプレート編集")
         .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button { UIApplication.hideKeyboard() } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                }
+            }
             ToolbarItem(placement: .navigationBarLeading) {
-                Button { items.append(Item(text: "")) } label: { Image(systemName: "plus") }
+                Button { items.append(Item(id: UUID(), text: "", images: [])) } label: { Image(systemName: "plus") }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("保存") {
-                    settings.templates = items.map(\.text)
-                        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    settings.postTemplates = items.map { PostTemplate(id: $0.id, text: $0.text, images: $0.images) }
+                    TemplateImageStore.shared.deleteAllExcept(items.flatMap(\.images))
                     dismiss()
                 }
             }
         }
-        .onAppear { items = settings.templates.map { Item(text: $0) } }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $pickedPhoto, matching: .images)
+        .onChange(of: pickedPhoto) { item in
+            guard let row = photoTarget, let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    addImage(to: row, data: data)
+                }
+                pickedPhoto = nil
+            }
+        }
+        .fileImporter(isPresented: $showFileImporter,
+                      allowedContentTypes: [.image],
+                      allowsMultipleSelection: true) { result in
+            let row = fileTarget
+            fileTarget = nil
+            guard let row else { return }
+            switch result {
+            case .success(let urls):
+                for url in urls {
+                    let secured = url.startAccessingSecurityScopedResource()
+                    defer { if secured { url.stopAccessingSecurityScopedResource() } }
+                    if let data = try? Data(contentsOf: url) {
+                        addImage(to: row, data: data)
+                    }
+                }
+            case .failure(let error):
+                LogStore.shared.log(.warning, "template", "ファイル選択エラー: \(error.localizedDescription)")
+            }
+        }
+        .alert(item: $alert) { item in
+            Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("OK")))
+        }
+        .onAppear {
+            items = settings.postTemplates.map { Item(id: $0.id, text: $0.text, images: $0.images) }
+        }
+    }
+
+    @ViewBuilder
+    private func templateRow(_ item: Binding<Item>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("本文({rand} / {rand:N} を使用可)", text: item.text, axis: .vertical)
+                .frame(minHeight: 40)
+
+            if !item.wrappedValue.images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(item.wrappedValue.images, id: \.self) { name in
+                            imageThumb(item, name)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button {
+                    photoTarget = item.wrappedValue.id
+                    showPhotoPicker = true
+                } label: { Label("写真", systemImage: "photo") }
+                .disabled(item.wrappedValue.images.count >= ImageUtil.maxCount)
+
+                Button {
+                    fileTarget = item.wrappedValue.id
+                    showFileImporter = true
+                } label: { Label("ファイル", systemImage: "folder") }
+                .disabled(item.wrappedValue.images.count >= ImageUtil.maxCount)
+
+                Spacer()
+                Text("{rand} = ランダム文字列")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .font(.caption)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func imageThumb(_ item: Binding<Item>, _ name: String) -> some View {
+        Group {
+            if let data = TemplateImageStore.shared.load(name), let ui = UIImage(data: data) {
+                Image(uiImage: ui)
+                    .resizable().scaledToFill()
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 56, height: 56)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                item.wrappedValue.images.removeAll { $0 == name }
+                TemplateImageStore.shared.delete(name)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .offset(x: 5, y: -5)
+        }
+    }
+
+    private func addImage(to rowID: UUID, data: Data) {
+        guard let idx = items.firstIndex(where: { $0.id == rowID }) else { return }
+        guard items[idx].images.count < ImageUtil.maxCount else {
+            alert = AlertItem(title: "追加できません", message: "画像はテンプレートごとに最大\(ImageUtil.maxCount)枚です")
+            return
+        }
+        switch ImageUtil.process(data, suggestedName: nil) {
+        case .success(let m):
+            let ext = (m.filename as NSString).pathExtension
+            if let name = TemplateImageStore.shared.save(m.data, ext: ext) {
+                items[idx].images.append(name)
+                LogStore.shared.log(.debug, "template", "テンプレ画像追加: \(name) (\(m.mimeType))")
+            } else {
+                alert = AlertItem(title: "保存失敗", message: "画像を保存できませんでした")
+            }
+        case .failure(let message):
+            alert = AlertItem(title: "画像を追加できません", message: message)
+        }
     }
 }
