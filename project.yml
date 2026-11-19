@@ -1,0 +1,41 @@
+
+> ⚠️ 貼り付けの注意：コードブロックの**中身だけ**を貼る(` ```swift ` のような行は含めない)。インデント(行頭のスペース)を消さないこと。特にYAMLはスペースが崩れると動きません。
+
+`build.yml` を**最後**に作る理由：作成した瞬間にpushトリガーでビルドが走るからです(先に作ると、ファイルが揃う前のビルドが失敗履歴として並びます)。
+
+---
+
+# ステップ3:`project.yml`(プロジェクト自動生成の定義)
+
+`project.yml` に以下を貼り付け：
+
+```yaml
+name: KashejoBot
+options:
+  bundleIdPrefix: com.kashejo
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  KashejoBot:
+    type: application
+    platform: iOS
+    sources:
+      - path: KashejoBot
+    info:
+      path: KashejoBot/Info.plist
+      properties:
+        CFBundleDisplayName: KashejoBot
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  KashejoBot:
+    build:
+      targets:
+        KashejoBot: all
