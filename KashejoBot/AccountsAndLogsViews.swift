@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - アカウント管理
 
@@ -12,7 +13,7 @@ struct AccountsView: View {
     var body: some View {
         List {
             if accounts.accounts.isEmpty {
-                Text("アカウントがありません。「+」からbotトークンを登録してください")
+                Text("アカウントがありません。「+」からAPIキーを登録してください")
                     .foregroundStyle(.secondary)
             }
             ForEach(accounts.accounts) { acc in
@@ -68,15 +69,12 @@ struct AccountsView: View {
         Task {
             do {
                 let client = try settings.makeClient(token: acc.token)
-                let info = try await client.fetchAccount()
-                if let info {
-                    alert = AlertItem(title: "接続OK",
-                                      message: "@\(info.username)" + (info.name.map { " (\($0))" } ?? ""))
-                } else {
-                    alert = AlertItem(title: "接続OK", message: "サーバーに応答がありました(形式は未確認)")
-                }
+                let raw = try await client.fetchMe()
+                alert = AlertItem(title: "接続OK", message: String(raw.prefix(200)))
+                LogStore.shared.log(.info, "account", "接続テスト成功(\(acc.label))")
             } catch {
                 alert = AlertItem(title: "接続失敗", message: error.localizedDescription)
+                LogStore.shared.log(.error, "account", "接続テスト失敗(\(acc.label)): \(error.localizedDescription)")
             }
         }
     }
@@ -104,15 +102,16 @@ struct AddAccountSheet: View {
                     Text("ユーザー名")
                 }
                 Section {
-                    SecureField("サイトで発行したAPIトークン", text: $token)
+                    SecureField("サイトで発行したAPIキー", text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } header: {
-                    Text("APIトークン")
+                    Text("APIキー")
                 } footer: {
-                    Text("トークンはキーチェーンに暗号化して保存されます。")
+                    Text("キーはキーチェーンに暗号化保存され、Authorization: Bearerヘッダーで送信されます。")
                 }
             }
+            .dismissibleKeyboard()
             .navigationTitle("アカウント追加")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -144,7 +143,7 @@ struct LogsView: View {
 
     private var filtered: [LogEntry] {
         let base = filter == nil ? logs.entries : logs.entries.filter { $0.level == filter }
-        return base.reversed() // 新しい順
+        return base.reversed()
     }
 
     var body: some View {
@@ -229,9 +228,6 @@ struct LogsView: View {
         }
     }
 }
-
-// 共有シート(iOS 16対応のためUIKitラッパ)
-import UIKit
 
 struct ActivityView: UIViewControllerRepresentable {
     let url: URL
