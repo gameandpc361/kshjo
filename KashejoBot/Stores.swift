@@ -6,23 +6,14 @@ import SwiftUI
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
-    // 接続先
     @Published var baseURLString: String { didSet { defaults.set(baseURLString, forKey: "k.baseURL") } }
-    @Published var notesPath: String { didSet { defaults.set(notesPath, forKey: "k.notesPath") } }
-    @Published var filesPath: String { didSet { defaults.set(filesPath, forKey: "k.filesPath") } }
-    @Published var signupPath: String { didSet { defaults.set(signupPath, forKey: "k.signupPath") } }
-
-    // 投稿設定
-    @Published var visibility: Visibility { didSet { defaults.set(visibility.rawValue, forKey: "k.visibility") } }
     @Published var maxChars: Int { didSet { defaults.set(maxChars, forKey: "k.maxChars") } }
-    @Published var templates: [String] { didSet { defaults.set(templates, forKey: "k.templates") } }
+    @Published var postTemplates: [PostTemplate] { didSet { persistTemplates() } }
 
-    // 連投設定
     @Published var burstCount: Int { didSet { defaults.set(burstCount, forKey: "k.burstCount") } }
     @Published var intervalValue: Double { didSet { defaults.set(intervalValue, forKey: "k.intervalValue") } }
     @Published var intervalUnit: IntervalUnit { didSet { defaults.set(intervalUnit.rawValue, forKey: "k.intervalUnit") } }
     @Published var orderRandom: Bool { didSet { defaults.set(orderRandom, forKey: "k.orderRandom") } }
-    @Published var attachImages: Bool { didSet { defaults.set(attachImages, forKey: "k.attachImages") } }
     @Published var retryLimit: Int { didSet { defaults.set(retryLimit, forKey: "k.retryLimit") } }
     @Published var failureThreshold: Int { didSet { defaults.set(failureThreshold, forKey: "k.failureThreshold") } }
     @Published var autoRecreate: Bool { didSet { defaults.set(autoRecreate, forKey: "k.autoRecreate") } }
@@ -31,24 +22,37 @@ final class SettingsStore: ObservableObject {
 
     private init() {
         baseURLString = defaults.string(forKey: "k.baseURL") ?? "https://kashejo.f5.si"
-        notesPath = defaults.string(forKey: "k.notesPath") ?? "api/notes/create"
-        filesPath = defaults.string(forKey: "k.filesPath") ?? "api/drive/files/create"
-        signupPath = defaults.string(forKey: "k.signupPath") ?? "api/accounts/create"
-        visibility = Visibility(rawValue: defaults.string(forKey: "k.visibility") ?? "") ?? .public
         maxChars = defaults.object(forKey: "k.maxChars") as? Int ?? 3000
-        templates = defaults.stringArray(forKey: "k.templates") ?? [
-            "おはようございます☀️",
-            "定期投稿です 🤖",
-            "今日も良い一日を!"
-        ]
+
+        // テンプレート(新形式 → 旧形式からの移行 → 初期値)
+        if let data = defaults.data(forKey: "k.postTemplates"),
+           let decoded = try? JSONDecoder().decode([PostTemplate].self, from: data) {
+            postTemplates = decoded
+        } else if let old = defaults.stringArray(forKey: "k.templates"), !old.isEmpty {
+            postTemplates = old.map { PostTemplate(id: UUID(), text: $0, images: []) }
+            persistTemplates()
+            LogStore.shared.log(.info, "template", "旧テンプレート\(old.count)件を新形式に移行しました")
+        } else {
+            postTemplates = [
+                PostTemplate(id: UUID(), text: "おはよう投稿 {rand}", images: []),
+                PostTemplate(id: UUID(), text: "定期投稿 {datetime}", images: [])
+            ]
+            persistTemplates()
+        }
+
         burstCount = defaults.object(forKey: "k.burstCount") as? Int ?? 5
         intervalValue = defaults.object(forKey: "k.intervalValue") as? Double ?? 5
         intervalUnit = IntervalUnit(rawValue: defaults.string(forKey: "k.intervalUnit") ?? "") ?? .minutes
         orderRandom = defaults.object(forKey: "k.orderRandom") as? Bool ?? false
-        attachImages = defaults.object(forKey: "k.attachImages") as? Bool ?? false
         retryLimit = defaults.object(forKey: "k.retryLimit") as? Int ?? 1
         failureThreshold = defaults.object(forKey: "k.failureThreshold") as? Int ?? 3
         autoRecreate = defaults.object(forKey: "k.autoRecreate") as? Bool ?? false
+    }
+
+    private func persistTemplates() {
+        if let data = try? JSONEncoder().encode(postTemplates) {
+            defaults.set(data, forKey: "k.postTemplates")
+        }
     }
 
     var baseURL: URL? {
@@ -61,10 +65,103 @@ final class SettingsStore: ObservableObject {
             throw APIError(message: "ベースURLが不正です(設定を確認)")
         }
         guard !token.isEmpty else {
-            throw APIError(message: "APIトークンが未設定です(アカウント管理で登録)")
+            throw APIError(message: "APIキーが未設定です(アカウント管理で登録)")
         }
-        return APIClient(baseURL: base, token: token,
-                         notesPath: notesPath, filesPath: filesPath, signupPath: signupPath)
+        return APIClient(baseURL: base, token: token)
+    }
+}
+
+// MARK: - テンプレート画像の保存領域
+
+final class TemplateImageStore {
+    static let shared = TemplateImageStore()
+
+    private let dir: URL
+
+    private init() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        dir = docs.appendingPathComponent("template_images", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    func save(_ data: Data, ext: String) -> String? {
+        let cleanExt = ext.isEmpty ? "jpg" : ext
+        let name = "\(UUID().uuidString).\(cleanExt)"
+        do {
+            try data.write(to: dir.appendingPathComponent(name))
+            return name
+        } catch {
+            return nil
+        }
+    }
+
+    func load(_ name: String) -> Data? {
+        try? Data(contentsOf: dir.appendingPathComponent(name))
+    }
+
+    func delete(_ name: String) {
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+    }
+
+    /// 保存時に不要になった画像ファイルの一括掃除
+    func deleteAllExcept(_ keep: [String]) {
+        let keepSet = Set(keep)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for url in files where !keepSet.contains(url.lastPathComponent) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func mediaItem(_ name: String) -> MediaItem? {
+        guard let data = load(name) else { return nil }
+        let ext = (name as NSString).pathExtension
+        let mime = ImageFormat.from(fileExtension: ext)?.mimeType ?? "application/octet-stream"
+        return MediaItem(data: data, filename: name, mimeType: mime)
+    }
+}
+
+// MARK: - ランダム文字列({rand} の展開)
+
+enum RandomText {
+    static func expand(_ template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\{rand(?::(\d{1,3}))?\}"#) else {
+            return template
+        }
+        let ns = template as NSString
+        var result = ns
+        // 後方から置換すると前の位置がずれない
+        for match in regex.matches(in: template, range: NSRange(location: 0, length: ns.length)).reversed() {
+            var length = 10
+            if match.range(at: 1).location != NSNotFound,
+               let n = Int(ns.substring(with: match.range(at: 1))) {
+                length = n
+            }
+            result = result.replacingCharacters(in: match.range, with: randomString(length))
+        }
+        return result as String
+    }
+
+    /// プレースホルダを最大長で展開した場合の文字数(上限チェック用)
+    static func worstLength(_ template: String) -> Int {
+        guard let regex = try? NSRegularExpression(pattern: #"\{rand(?::(\d{1,3}))?\}"#) else {
+            return template.count
+        }
+        let ns = template as NSString
+        var length = ns.length
+        for match in regex.matches(in: template, range: NSRange(location: 0, length: ns.length)) {
+            var n = 10
+            if match.range(at: 1).location != NSNotFound,
+               let v = Int(ns.substring(with: match.range(at: 1))) {
+                n = v
+            }
+            length = length - match.range.length + max(1, min(500, n))
+        }
+        return length
+    }
+
+    static func randomString(_ length: Int) -> String {
+        let chars = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        return String((0..<max(1, min(500, length))).map { _ in chars.randomElement()! })
     }
 }
 
@@ -120,7 +217,6 @@ final class AccountStore: ObservableObject {
         }
     }
 
-    /// 次のアカウントへローテーション(失敗時の自動切替用)
     @discardableResult
     func rotate() -> AccountProfile? {
         guard accounts.count > 1 else { return nil }
