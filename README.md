@@ -65,5 +65,4 @@ POST
         "images": []
     },
 
-```
-json
+```json
