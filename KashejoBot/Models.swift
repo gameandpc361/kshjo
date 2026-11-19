@@ -1,23 +1,52 @@
 import Foundation
 
-// MARK: - APIレスポンス
+// MARK: - 画像形式
 
-struct Note: Codable, Identifiable {
-    let id: String
-    let createdAt: String
-    let text: String?
+enum ImageFormat: String, CaseIterable {
+    case png, jpeg, gif, webp, avif
+
+    var mimeType: String {
+        switch self {
+        case .png:  return "image/png"
+        case .jpeg: return "image/jpeg"
+        case .gif:  return "image/gif"
+        case .webp: return "image/webp"
+        case .avif: return "image/avif"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .png:  return "png"
+        case .jpeg: return "jpg"
+        case .gif:  return "gif"
+        case .webp: return "webp"
+        case .avif: return "avif"
+        }
+    }
+
+    static func from(fileExtension ext: String) -> ImageFormat? {
+        let lower = ext.lowercased()
+        return allCases.first { $0.fileExtension == lower || $0.rawValue == lower }
+    }
 }
 
-struct DriveFile: Codable {
-    let id: String
+struct MediaItem: Identifiable {
+    let id = UUID()
+    let data: Data
+    let filename: String
+    let mimeType: String
 }
 
-struct AccountInfo: Codable {
-    let username: String
-    let name: String?
+// MARK: - テンプレート
+
+struct PostTemplate: Identifiable, Codable {
+    let id: UUID
+    var text: String        // {rand} / {rand:N} を含められる
+    var images: [String]    // TemplateImageStore 内のファイル名
 }
 
-// MARK: - アプリ内部モデル
+// MARK: - 履歴
 
 struct HistoryEntry: Identifiable, Codable {
     let id: UUID
@@ -38,20 +67,8 @@ struct AlertItem: Identifiable {
 
 struct APIError: LocalizedError {
     let message: String
+    var isConfigError: Bool = false
     var errorDescription: String? { message }
-}
-
-enum Visibility: String, CaseIterable, Codable, Identifiable {
-    case `public`, home, followers, spec
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .public:    return "パブリック"
-        case .home:      return "ホーム"
-        case .followers: return "フォロワー"
-        case .spec:      return "ダイレクト"
-        }
-    }
 }
 
 // MARK: - ログ
@@ -65,14 +82,6 @@ enum LogLevel: String, Codable, CaseIterable, Identifiable {
         case .info:    return "情報"
         case .warning: return "警告"
         case .error:   return "エラー"
-        }
-    }
-    var colorName: String {
-        switch self {
-        case .debug:   return "gray"
-        case .info:    return "blue"
-        case .warning: return "orange"
-        case .error:   return "red"
         }
     }
 }
@@ -121,7 +130,6 @@ struct BurstConfig {
     let count: Int
     let interval: TimeInterval
     let orderRandom: Bool
-    let attachImages: Bool
     let retryLimit: Int
     let failureThreshold: Int
 
@@ -129,7 +137,6 @@ struct BurstConfig {
         count = max(1, s.burstCount)
         interval = max(1, s.intervalValue) * s.intervalUnit.factor
         orderRandom = s.orderRandom
-        attachImages = s.attachImages
         retryLimit = s.retryLimit
         failureThreshold = s.failureThreshold
     }
