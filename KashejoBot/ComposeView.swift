@@ -1,5 +1,7 @@
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
+import UIKit
 
 struct ComposeView: View {
     @ObservedObject private var settings = SettingsStore.shared
@@ -7,9 +9,11 @@ struct ComposeView: View {
     @ObservedObject private var history = HistoryStore.shared
 
     @State private var text = ""
-    @State private var pickerItem: PhotosPickerItem?
-    @State private var imageData: Data?
+    @State private var media: [MediaItem] = []
+    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var showFileImporter = false
     @State private var sending = false
+    @State private var statusText = ""
     @State private var alert: AlertItem?
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -28,32 +32,34 @@ struct ComposeView: View {
                         .foregroundStyle(overLimit ? Color.red : Color.secondary)
                 }
 
-                Section("画像(任意・1枚)") {
-                    if let data = imageData, let ui = UIImage(data: data) {
-                        HStack(alignment: .top) {
-                            Image(uiImage: ui)
-                                .resizable().scaledToFit()
-                                .frame(maxHeight: 150)
-                                .cornerRadius(8)
-                            Spacer()
-                            Button("取り消す", role: .destructive) {
-                                imageData = nil
-                                pickerItem = nil
+                Section("画像(最大\(ImageUtil.maxCount)枚・各10MiB)") {
+                    if !media.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack {
+                                ForEach(media) { item in
+                                    thumbnail(item)
+                                }
                             }
                         }
-                    } else {
-                        PhotosPicker(selection: $pickerItem, matching: .images) {
-                            Label("画像を選ぶ", systemImage: "photo.on.rectangle")
+                    }
+                    HStack {
+                        PhotosPicker(selection: $pickerItems,
+                                     maxSelectionCount: max(1, ImageUtil.maxCount - media.count),
+                                     matching: .images) {
+                            Label("写真から", systemImage: "photo.on.rectangle")
                         }
+                        .disabled(media.count >= ImageUtil.maxCount)
+
+                        Button {
+                            showFileImporter = true
+                        } label: {
+                            Label("ファイルから", systemImage: "folder")
+                        }
+                        .disabled(media.count >= ImageUtil.maxCount)
                     }
                 }
 
-                Section("公開範囲 / アカウント") {
-                    Picker("公開範囲", selection: $settings.visibility) {
-                        ForEach(Visibility.allCases) { v in Text(v.label).tag(v) }
-                    }
-                    .pickerStyle(.segmented)
-
+                Section("アカウント") {
                     HStack {
                         Text("送信元")
                         Spacer()
@@ -69,22 +75,42 @@ struct ComposeView: View {
                         HStack {
                             Spacer()
                             if sending { ProgressView().padding(.trailing, 8) }
-                            Text(sending ? "送信中…" : "投稿する").bold()
+                            Text(sending ? (statusText.isEmpty ? "送信中…" : statusText) : "投稿する").bold()
                             Spacer()
                         }
                     }
-                    .disabled(sending || (trimmed.isEmpty && imageData == nil) || overLimit || accounts.active == nil)
+                    .disabled(sending || (trimmed.isEmpty && media.isEmpty) || overLimit || accounts.active == nil)
                 } footer: {
                     if overLimit { Text("文字数が上限を超えています").foregroundStyle(.red) }
                 }
             }
+            .dismissibleKeyboard()
             .navigationTitle("bot投稿")
-            .onChange(of: pickerItem) { item in
-                guard let item else { return }
+            .onChange(of: pickerItems) { items in
+                guard !items.isEmpty else { return }
                 Task {
-                    if let data = try? await item.loadTransferable(type: Data.self) {
-                        imageData = ImageUtil.jpegData(from: data)
+                    for item in items {
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            addData(data, suggestedName: nil)
+                        }
                     }
+                    pickerItems = []
+                }
+            }
+            .fileImporter(isPresented: $showFileImporter,
+                          allowedContentTypes: [.image],
+                          allowsMultipleSelection: true) { result in
+                switch result {
+                case .success(let urls):
+                    for url in urls {
+                        let secured = url.startAccessingSecurityScopedResource()
+                        defer { if secured { url.stopAccessingSecurityScopedResource() } }
+                        if let data = try? Data(contentsOf: url) {
+                            addData(data, suggestedName: url.lastPathComponent)
+                        }
+                    }
+                case .failure(let error):
+                    LogStore.shared.log(.warning, "api", "ファイル選択エラー: \(error.localizedDescription)")
                 }
             }
             .alert(item: $alert) { item in
@@ -94,40 +120,83 @@ struct ComposeView: View {
         }
     }
 
+    private func thumbnail(_ item: MediaItem) -> some View {
+        Group {
+            if let ui = UIImage(data: item.data) {
+                Image(uiImage: ui)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 70, height: 70)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 70, height: 70)
+                    .overlay {
+                        Image(systemName: "photo").foregroundStyle(.secondary)
+                    }
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                media.removeAll { $0.id == item.id }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .offset(x: 6, y: -6)
+        }
+    }
+
+    private func addData(_ data: Data, suggestedName: String?) {
+        guard media.count < ImageUtil.maxCount else {
+            alert = AlertItem(title: "追加できません", message: "画像は最大\(ImageUtil.maxCount)枚までです")
+            return
+        }
+        switch ImageUtil.process(data, suggestedName: suggestedName) {
+        case .success(let item):
+            media.append(item)
+            LogStore.shared.log(.debug, "api", "画像追加: \(item.filename) \(item.data.count) bytes \(item.mimeType)")
+        case .failure(let message):
+            alert = AlertItem(title: "画像を追加できません", message: message)
+        }
+    }
+
     @MainActor
     private func send() async {
         guard !sending, let account = accounts.active else { return }
         sending = true
         defer { sending = false }
-        LogStore.shared.log(.info, "api", "手動投稿開始 @\(account.username)")
+        let content = text
+        LogStore.shared.log(.info, "api", "手動投稿開始 @\(account.username) 画像\(media.count)枚")
 
         do {
             let client = try settings.makeClient(token: account.token)
             var fileIds: [String] = []
-            if let data = imageData {
-                LogStore.shared.log(.debug, "api", "画像アップロード (\(data.count) bytes)")
-                if let file = try await client.uploadFile(data, filename: "post_\(Int(Date().timeIntervalSince1970)).jpg",
-                                                          mimeType: "image/jpeg") {
-                    fileIds = [file.id]
-                } else {
-                    LogStore.shared.log(.warning, "api", "アップロード応答を解析できずテキストのみ投稿")
-                }
+            for (index, item) in media.enumerated() {
+                statusText = "画像アップロード中 (\(index + 1)/\(media.count))"
+                let id = try await client.uploadFile(item)
+                fileIds.append(id)
+                LogStore.shared.log(.debug, "api", "アップロード完了: \(id)")
             }
-            let note = try await client.createNote(text: text, fileIds: fileIds,
-                                                   visibility: settings.visibility.rawValue)
+            statusText = "投稿中…"
+            let response = try await client.createPost(text: content.isEmpty ? nil : content,
+                                                       fileIds: fileIds)
             history.add(HistoryEntry(id: UUID(), date: Date(), account: account.label,
                                      kind: fileIds.isEmpty ? "text" : "image",
-                                     text: trimmed, hasImage: !fileIds.isEmpty,
+                                     text: content, hasImage: !fileIds.isEmpty,
                                      success: true,
-                                     message: note.map { "ID: \($0.id)" } ?? "投稿しました"))
-            LogStore.shared.log(.info, "api", "手動投稿成功 \(note?.id ?? "")")
+                                     message: String(response.prefix(150))))
+            LogStore.shared.log(.info, "api", "投稿成功: \(String(response.prefix(300)))")
             text = ""
-            imageData = nil
-            pickerItem = nil
+            media = []
+            pickerItems = []
+            statusText = ""
         } catch {
+            statusText = ""
             history.add(HistoryEntry(id: UUID(), date: Date(), account: account.label,
-                                     kind: imageData == nil ? "text" : "image",
-                                     text: trimmed, hasImage: imageData != nil,
+                                     kind: media.isEmpty ? "text" : "image",
+                                     text: content, hasImage: !media.isEmpty,
                                      success: false, message: error.localizedDescription))
             LogStore.shared.log(.error, "api", "手動投稿失敗: \(error.localizedDescription)")
             alert = AlertItem(title: "投稿失敗", message: error.localizedDescription)
