@@ -1,0 +1,47 @@
+name: iOS Build (IPA)
+
+on:
+  push:
+    branches: [ main ]   # mainにpushしたら自動ビルド
+  workflow_dispatch:     # 手動実行ボタンも有効
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: コード取得
+        uses: actions/checkout@v4
+
+      - name: XcodeGenインストール
+        run: brew install xcodegen
+
+      - name: Xcodeプロジェクト自動生成
+        run: xcodegen generate
+
+      - name: ビルド(未署名)
+        run: |
+          xcodebuild \
+            -project KashejoBot.xcodeproj \
+            -scheme KashejoBot \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: IPAに梱包
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/KashejoBot.app Payload/
+          zip -r KashejoBot-unsigned.ipa Payload
+
+      - name: 成果物を保存
+        uses: actions/upload-artifact@v4
+        with:
+          name: KashejoBot-ipa
+          path: KashejoBot-unsigned.ipa
